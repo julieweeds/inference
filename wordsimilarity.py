@@ -1,6 +1,17 @@
+####
+#implementation of Pilehvar and Collier 2017
+#Correlation of similarity judgments with human judgments for rare words
+#To obtain similar results to them, need case_insensitive=True and unknown=random (or dummy)
+#Still find an extra 2 pairs which are not OOV (also found by the gensim implementation which runs via WordReps.correlate()
+#The idea is to look at different ways of finding semantic landmarks including the distributional inclusion hypothesis ... not sure that this will work for dense representations
+#maybe experiment between centroid, max and min?
+####
+
+
 import os,sys,configparser,csv, numpy as np, scipy.stats as stats,math
 from gensim.models import KeyedVectors
 from gensim import matutils
+from nltk.corpus import wordnet as wn
 
 def sim(vectorA,vectorB,metric="dot"):
 
@@ -13,14 +24,29 @@ def sim(vectorA,vectorB,metric="dot"):
         return np.dot(vectorA,vectorB)
 
 def getrank(wordvectors,word):
-
+    #not used ... use WordReps.wv.index2word instead
     try:
         rank= wordvectors.vocab[word].__dict__['index']
     except:
         rank=-1
     return rank
 
+def find_landmarks(word,vocab=[]):
+    landmarks=[]
 
+    wnsynsets=wn.synsets(word.lower())
+    for wnsynset in wnsynsets:
+        landmarks+=wnsynset.lemmas()
+
+    landmarks=[str(lemma.name()).upper() for lemma in landmarks]
+
+    candidates=[]
+    for landmark in landmarks:
+        if landmark != word:
+            if vocab==[] or landmark in vocab:
+                candidates.append(landmark)
+    #print(word,candidates)
+    return candidates
 
 class WordReps:
 
@@ -60,7 +86,43 @@ class WordReps:
 
         percent=len(self.oovwords)*100.0/len(wordlist)
         print("{} OOV words ({}\%)".format(len(self.oovwords),percent))
-        #print(self.vectorcache.keys())
+        print(self.vectorcache.keys())
+
+    def update_one(self,word,landmarks,theta=1):
+        result=theta * self.vectorcache[word]
+        #print(result)
+        n=len(landmarks)
+        for index,landmark in enumerate(landmarks):
+            i=index+1
+            multiplier= math.exp(-i)/n
+            result+=multiplier * self.wv[self.ok_vocab[landmark]]
+            #print(multiplier, self.vectorcache[word])
+            #break
+
+        #print(result)
+        return result
+
+    def infer(self,flag='oov'):
+        #inference for just oovwords or for all words
+        if flag == 'all':
+            words=self.vectorcache.keys()
+        else:
+            words=self.oovwords
+
+        landmarks={}
+        for word in words:
+            landmarks[word]=find_landmarks(word,self.ok_vocab.keys())
+
+        old_oov=self.oovwords
+        self.oovwords=[]
+        for word in words:
+            if word in old_oov and len(landmarks[word])==0:
+                self.oovwords.append(word)
+            else:
+                self.vectorcache[word]=self.update_one(word,landmarks[word])
+                #break
+
+        #sys.exit()
 
     def randomise(self,words):
         self.vectorcache={}
@@ -200,10 +262,10 @@ class Correlator:
         self.config=configparser.ConfigParser()
         self.config.read(configfile)
 
-
+        self.testing=self.config.getboolean('default','testing')
         dataset=self.config.get('default','dataset')
         self.datafile=os.path.join(self.config.get('default','datapath'),self.config.get(dataset,'datafile'))
-        self.myData=Dataset(self.datafile,header=int(self.config.get(dataset,'header')))
+
 
         #self.myData.rewrite(self.datafile+".new")
 
@@ -212,24 +274,31 @@ class Correlator:
         self.vocabsize=int(self.config.get('default','vocabsize'))
         self.unknown = self.config.get('default', 'unknown')
         self.case_insensitive= self.config.getboolean('default','case_insensitive')
-        self.myWordReps = WordReps(self.vectorfile,vocabsize=self.vocabsize,unknown=self.unknown,case_insensitive=self.case_insensitive)
+        self.infer_flag=self.config.get('default','infer_flag')
+
+        if not self.testing:
+            self.myData = Dataset(self.datafile, header=int(self.config.get(dataset, 'header')))
+            self.myWordReps = WordReps(self.vectorfile,vocabsize=self.vocabsize,unknown=self.unknown,case_insensitive=self.case_insensitive)
 
 
     def test(self):
-        self.myWordReps.test()
-        self.myData.test()
+        #self.myWordReps.test()
+        #self.myData.test()
+        find_landmarks("TRICLINIC")
 
     def run(self):
-        self.myWordReps.correlate(self.datafile)
-        words=self.myData.get_words_of_interest()
-        #words=filter(self.myWordReps.wv,words,self.vocabsize)
-        #print("Number of filtered words is {}".format(len(words)))
-        self.myWordReps.makecache(words)
-        self.myWordReps.correlate_cache(self.myData)
-        self.myWordReps.randomise(words)
-        self.myWordReps.correlate_cache(self.myData)
+        if self.testing:
+            self.test()
+        else:
+            self.myWordReps.correlate(self.datafile)
+            words=self.myData.get_words_of_interest()
+            self.myWordReps.makecache(words)
+            self.myWordReps.correlate_cache(self.myData)
+            #self.myWordReps.randomise(words)
+            #self.myWordReps.correlate_cache(self.myData)
 
-
+            self.myWordReps.infer(flag=self.infer_flag)
+            self.myWordReps.correlate_cache(self.myData)
 
 if __name__=="__main__":
 
