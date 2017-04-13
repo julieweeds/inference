@@ -8,7 +8,7 @@
 ####
 
 
-import os,sys,configparser,csv, numpy as np, scipy.stats as stats,math
+import os,sys,configparser,csv, numpy as np, scipy.stats as stats,math,ast
 from gensim.models import KeyedVectors
 from gensim import matutils
 from nltk.corpus import wordnet as wn
@@ -31,14 +31,28 @@ def getrank(wordvectors,word):
         rank=-1
     return rank
 
-def find_landmarks(word,vocab=[]):
+def find_landmarks(word,vocab=[],method=["synonyms"],case_insensitive = False):
+    if case_insensitive:
+        wnsynsets = wn.synsets(word.lower())
+        wnlemmas = wn.lemmas(word.lower())
+    else:
+        wnsynsets = wn.synsets(word)
+        wnlemmas = wn.lemmas(word)
+
     landmarks=[]
+    for m in method:
 
-    wnsynsets=wn.synsets(word.lower())
-    for wnsynset in wnsynsets:
-        landmarks+=wnsynset.lemmas()
+        if m=="synonyms":
+            landmarks+=find_synonyms(wnsynsets)
+        elif m =="antonyms":
+            landmarks+=find_antonyms(wnlemmas)
+        else:
+            landmarks+=find_related(wnsynsets,relation=m)
 
-    landmarks=[str(lemma.name()).upper() for lemma in landmarks]
+    if case_insensitive:
+        landmarks = [str(lemma.name()).upper() for lemma in landmarks]
+    else:
+        landmarks = [str(lemma.name()) for lemma in landmarks]
 
     candidates=[]
     for landmark in landmarks:
@@ -47,6 +61,70 @@ def find_landmarks(word,vocab=[]):
                 candidates.append(landmark)
     #print(word,candidates)
     return candidates
+
+def find_synonyms(wnsynsets):
+    landmarks = []
+    for wnsynset in wnsynsets:
+        landmarks += wnsynset.lemmas()
+
+    return landmarks
+
+def find_antonyms(wnlemmas):
+    landmarks=[]
+    for l in wnlemmas:
+        landmarks+=l.antonyms()
+    return landmarks
+
+def hypernyms(wnsynset):
+    return wnsynset.hypernyms()+wnsynset.instance_hypernyms()
+
+def ancestors(wnsynset):
+    hs=hypernyms(wnsynset)
+    ancs=hs
+    for hypernym in hs:
+        ancs+=ancestors(hypernym)
+    return ancs
+
+def find_related(wnsynsets,relation="hypernyms"):
+    landmarks=[]
+    for wnsynset in wnsynsets:
+        if relation =="ancestors":
+            related=ancestors(wnsynset)
+
+        elif relation =="hypernyms":
+            related = hypernyms(wnsynset)
+        elif relation == "hyponyms":
+            related = wnsynset.hyponyms()+wnsynset.instance_hyponyms()
+        elif relation == "meronyms":
+            related = wnsynset.member_meronyms()+wnsynset.substance_meronyms()+wnsynset.part_meronyms()
+        elif relation == "holonyms":
+            related = wnsynset.member_holonyms()+wnsynset.substance_holonyms()+wnsynset.part_holonyms()
+        elif relation == "attributes":
+            related = wnsynset.attributes()
+        elif relation == "entailments":
+            related = wnsynset.entailments()
+        elif relation == "cohyponyms" or relation == "co-hyponyms":
+            hypernyms=wnsynset.hypernyms()+wnsynset.instance_hypernyms()
+
+            related=[]
+            for hypernym in hypernyms:
+                cohyponyms=hypernym.hyponyms()+hypernym.instance_hyponyms()
+                for cohyponym in cohyponyms:
+                    if cohyponym!=wnsynset:
+                        related.append(cohyponym)
+        elif relation == "grandparents":
+            hypernyms=hypernyms(wnsynset)
+            related=[]
+            for hypernym in hypernyms:
+                related+=hypernyms(hypernym)
+
+
+        else:
+            print("Unknown method / relation {}".format(relation))
+            related=[]
+        for w in related:
+            landmarks+=w.lemmas()
+    return landmarks[:25]
 
 class WordReps:
 
@@ -88,7 +166,7 @@ class WordReps:
         print("{} OOV words ({}\%)".format(len(self.oovwords),percent))
         print(self.vectorcache.keys())
 
-    def update_one(self,word,landmarks,theta=1):
+    def update_one(self,word,landmarks,theta=0):
         result=theta * self.vectorcache[word]
         #print(result)
         n=len(landmarks)
@@ -102,16 +180,17 @@ class WordReps:
         #print(result)
         return result
 
-    def infer(self,flag='oov'):
+    def infer(self,flag='oov',method="synonyms"):
         #inference for just oovwords or for all words
         if flag == 'all':
             words=self.vectorcache.keys()
+
         else:
             words=self.oovwords
 
         landmarks={}
         for word in words:
-            landmarks[word]=find_landmarks(word,self.ok_vocab.keys())
+            landmarks[word]=find_landmarks(word,self.ok_vocab.keys(),method=method,case_insensitive=self.case_insensitive)
 
         old_oov=self.oovwords
         self.oovwords=[]
@@ -119,7 +198,11 @@ class WordReps:
             if word in old_oov and len(landmarks[word])==0:
                 self.oovwords.append(word)
             else:
-                self.vectorcache[word]=self.update_one(word,landmarks[word])
+                if word in old_oov:
+                    theta=0
+                else:
+                    theta=1
+                self.vectorcache[word]=self.update_one(word,landmarks[word],theta=theta)
                 #break
 
         #sys.exit()
@@ -275,6 +358,7 @@ class Correlator:
         self.unknown = self.config.get('default', 'unknown')
         self.case_insensitive= self.config.getboolean('default','case_insensitive')
         self.infer_flag=self.config.get('default','infer_flag')
+        self.infer_method=ast.literal_eval(self.config.get('default','infer_method'))
 
         if not self.testing:
             self.myData = Dataset(self.datafile, header=int(self.config.get(dataset, 'header')))
@@ -284,7 +368,14 @@ class Correlator:
     def test(self):
         #self.myWordReps.test()
         #self.myData.test()
-        find_landmarks("TRICLINIC")
+        words=["TRICLINIC","SQUIRT","TREE","DRY","WALK"]
+        for word in words:
+            print(word)
+
+            landmarks=find_landmarks(word,method=self.infer_method,case_insensitive=self.case_insensitive)
+
+            print(landmarks)
+
 
     def run(self):
         if self.testing:
@@ -297,7 +388,7 @@ class Correlator:
             #self.myWordReps.randomise(words)
             #self.myWordReps.correlate_cache(self.myData)
 
-            self.myWordReps.infer(flag=self.infer_flag)
+            self.myWordReps.infer(flag=self.infer_flag,method=self.infer_method)
             self.myWordReps.correlate_cache(self.myData)
 
 if __name__=="__main__":
